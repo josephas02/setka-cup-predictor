@@ -1,12 +1,13 @@
 import os
 import glob
 import json
+import zipfile
 import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 
-# Configuración de la página para que se vea bien en celulares y PC
+# Configuración de la página para móviles y PC
 st.set_page_config(
     page_title="Setka Cup Predictor",
     page_icon="🏓",
@@ -15,17 +16,32 @@ st.set_page_config(
 
 @st.cache_resource
 def cargar_modelo_y_datos():
-    # Buscar el archivo de jugadores en la raíz o en subcarpetas
-    archivos = glob.glob("setka_players_dump_*.json")
-    if not archivos:
-        archivos = glob.glob("**/setka_players_dump_*.json", recursive=True)
+    # 1. Buscar si hay archivos .zip comprimidos del dump
+    archivos_zip = glob.glob("setka_players_dump_*.zip")
+    if not archivos_zip:
+        archivos_zip = glob.glob("**/setka_players_dump_*.zip", recursive=True)
+        
+    jugadores = []
     
-    if not archivos:
+    if archivos_zip:
+        zip_path = max(archivos_zip, key=os.path.getmtime)
+        st.info(f"[*] Descomprimiendo base de datos desde {zip_path}...")
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            # Buscar el archivo json dentro del zip
+            json_names = [name for name in z.namelist() if name.endswith('.json')]
+            if json_names:
+                with z.open(json_names[0]) as f:
+                    jugadores = json.load(f)
+    else:
+        # Fallback por si hay un json pequeño local
+        archivos_json = glob.glob("setka_players_dump_*.json")
+        if archivos_json:
+            archivo_reciente = max(archivos_json, key=os.path.getmtime)
+            with open(archivo_reciente, "r", encoding="utf-8") as f:
+                jugadores = json.load(f)
+
+    if not jugadores:
         return None, []
-    
-    archivo_reciente = max(archivos, key=os.path.getmtime)
-    with open(archivo_reciente, "r", encoding="utf-8") as f:
-        jugadores = json.load(f)
         
     # Entrenamiento rápido en segundo plano para la app
     features_list = [
@@ -35,8 +51,10 @@ def cargar_modelo_y_datos():
     ]
     
     filas = []
-    for i in range(len(jugadores)):
-        for j in range(i + 1, min(i + 6, len(jugadores))):
+    # Tomamos una muestra representativa o todos si son manejables para el entrenamiento rápido en nube
+    limite_entreno = min(len(jugadores), 200) 
+    for i in range(limite_entreno):
+        for j in range(i + 1, min(i + 5, limite_entreno)):
             p1_raw = jugadores[i]
             p2_raw = jugadores[j]
             
@@ -60,7 +78,8 @@ def cargar_modelo_y_datos():
             
     df = pd.DataFrame(filas)
     model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
-    model.fit(df[features_list], df["target"])
+    if not df.empty:
+        model.fit(df[features_list], df["target"])
     
     return model, jugadores
 
@@ -102,7 +121,7 @@ st.markdown("Sistema inteligente de predicción de enfrentamientos de Tenis de M
 model, jugadores = cargar_modelo_y_datos()
 
 if not jugadores:
-    st.error("[!] No se encontró la base de datos de jugadores. Asegúrate de tener el archivo JSON en el proyecto.")
+    st.error("[!] No se encontró el archivo ZIP o JSON de jugadores en el repositorio.")
 else:
     nombres_jugadores = [f"{j.get('firstName', '')} {j.get('lastName', '')} (SC: {j.get('ratingSc', 0)})" for j in jugadores]
     
@@ -154,5 +173,4 @@ else:
         col_res1.metric(label=f"{jugador_a.get('firstName')} {jugador_a.get('lastName')}", value=f"{prob_a:.1f}%")
         col_res2.metric(label=f"{jugador_b.get('firstName')} {jugador_b.get('lastName')}", value=f"{prob_b:.1f}%")
         
-        # Barra de progreso visual
         st.progress(int(prob_a))
