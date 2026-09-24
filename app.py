@@ -1,0 +1,158 @@
+import os
+import glob
+import json
+import numpy as np
+import pandas as pd
+import streamlit as st
+from sklearn.ensemble import RandomForestClassifier
+
+# Configuración de la página para que se vea bien en celulares y PC
+st.set_page_config(
+    page_title="Setka Cup Predictor",
+    page_icon="🏓",
+    layout="centered"
+)
+
+@st.cache_resource
+def cargar_modelo_y_datos():
+    # Buscar el archivo de jugadores en la raíz o en subcarpetas
+    archivos = glob.glob("setka_players_dump_*.json")
+    if not archivos:
+        archivos = glob.glob("**/setka_players_dump_*.json", recursive=True)
+    
+    if not archivos:
+        return None, []
+    
+    archivo_reciente = max(archivos, key=os.path.getmtime)
+    with open(archivo_reciente, "r", encoding="utf-8") as f:
+        jugadores = json.load(f)
+        
+    # Entrenamiento rápido en segundo plano para la app
+    features_list = [
+        "diff_sc", "diff_uttf", "diff_win_rate", 
+        "diff_set_ratio", "diff_momentum", "diff_fatigue", 
+        "diff_puntos", "diff_exp"
+    ]
+    
+    filas = []
+    for i in range(len(jugadores)):
+        for j in range(i + 1, min(i + 6, len(jugadores))):
+            p1_raw = jugadores[i]
+            p2_raw = jugadores[j]
+            
+            f1 = extraer_features(p1_raw)
+            f2 = extraer_features(p2_raw)
+            
+            if f1["rating_sc"] == 0 or f2["rating_sc"] == 0:
+                continue
+                
+            filas.append({
+                "diff_sc": f1["rating_sc"] - f2["rating_sc"],
+                "diff_uttf": f1["rating_uttf"] - f2["rating_uttf"],
+                "diff_win_rate": f1["win_rate"] - f2["win_rate"],
+                "diff_set_ratio": f1["set_ratio"] - f2["set_ratio"],
+                "diff_momentum": f1["momentum"] - f2["momentum"],
+                "diff_fatigue": f1["fatigue"] - f2["fatigue"],
+                "diff_puntos": f1["promedio_puntos"] - f2["promedio_puntos"],
+                "diff_exp": f1["experiencia"] - f2["experiencia"],
+                "target": 1 if f1["rating_sc"] >= f2["rating_sc"] else 0
+            })
+            
+    df = pd.DataFrame(filas)
+    model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+    model.fit(df[features_list], df["target"])
+    
+    return model, jugadores
+
+def extraer_features(j):
+    stats = j.get("tournamentStats", [])
+    total_w = sum(s.get("matchWin", 0) for s in stats)
+    total_l = sum(s.get("matchLost", 0) for s in stats)
+    total_partidos = total_w + total_l
+    win_rate = (total_w / total_partidos) if total_partidos > 0 else 0.5
+    
+    total_sw = sum(s.get("setWin", 0) for s in stats)
+    total_sl = sum(s.get("setLost", 0) for s in stats)
+    set_ratio = (total_sw / (total_sw + total_sl)) if (total_sw + total_sl) > 0 else 0.5
+    
+    ultimos_torneos = stats[:3]
+    w_reciente = sum(s.get("matchWin", 0) for s in ultimos_torneos)
+    l_reciente = sum(s.get("matchLost", 0) for s in ultimos_torneos)
+    momentum = (w_reciente / (w_reciente + l_reciente)) if (w_reciente + l_reciente) > 0 else win_rate
+    
+    partidos_ult = (ultimos_torneos[0].get("matchWin", 0) + ultimos_torneos[0].get("matchLost", 0)) if ultimos_torneos else 0
+    fatigue = partidos_ult * 2
+    puntos = np.mean([s.get("points", 0) for s in stats]) if stats else 0
+    
+    return {
+        "rating_sc": j.get("ratingSc", 0) or 0,
+        "rating_uttf": j.get("ratingUttf", 0) or 0,
+        "win_rate": win_rate,
+        "set_ratio": set_ratio,
+        "momentum": momentum,
+        "fatigue": fatigue,
+        "promedio_puntos": puntos,
+        "experiencia": total_partidos
+    }
+
+# Interfaz Streamlit
+st.title("🏓 Setka Cup Predictor Pro")
+st.markdown("Sistema inteligente de predicción de enfrentamientos de Tenis de Mesa.")
+
+model, jugadores = cargar_modelo_y_datos()
+
+if not jugadores:
+    st.error("[!] No se encontró la base de datos de jugadores. Asegúrate de tener el archivo JSON en el proyecto.")
+else:
+    nombres_jugadores = [f"{j.get('firstName', '')} {j.get('lastName', '')} (SC: {j.get('ratingSc', 0)})" for j in jugadores]
+    
+    st.sidebar.header("Selección de Jugadores")
+    j1_nombre = st.sidebar.selectbox("Seleccione al Jugador A", nombres_jugadores, index=0)
+    j2_nombre = st.sidebar.selectbox("Seleccione al Jugador B", nombres_jugadores, index=1 if len(nombres_jugadores) > 1 else 0)
+    
+    idx_a = nombres_jugadores.index(j1_nombre)
+    idx_b = nombres_jugadores.index(j2_nombre)
+    
+    jugador_a = jugadores[idx_a]
+    jugador_b = jugadores[idx_b]
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Jugador A")
+        st.write(f"**Nombre:** {jugador_a.get('firstName')} {jugador_a.get('lastName')}")
+        st.write(f"**Ciudad:** {jugador_a.get('city')}")
+        st.write(f"**Rating SC:** {jugador_a.get('ratingSc')}")
+    with col2:
+        st.subheader("Jugador B")
+        st.write(f"**Nombre:** {jugador_b.get('firstName')} {jugador_b.get('lastName')}")
+        st.write(f"**Ciudad:** {jugador_b.get('city')}")
+        st.write(f"**Rating SC:** {jugador_b.get('ratingSc')}")
+        
+    if st.button("🔮 Predecir Enfrentamiento", type="primary", use_container_width=True):
+        f1 = extraer_features(jugador_a)
+        f2 = extraer_features(jugador_b)
+        
+        vector = pd.DataFrame([{
+            "diff_sc": f1["rating_sc"] - f2["rating_sc"],
+            "diff_uttf": f1["rating_uttf"] - f2["rating_uttf"],
+            "diff_win_rate": f1["win_rate"] - f2["win_rate"],
+            "diff_set_ratio": f1["set_ratio"] - f2["set_ratio"],
+            "diff_momentum": f1["momentum"] - f2["momentum"],
+            "diff_fatigue": f1["fatigue"] - f2["fatigue"],
+            "diff_puntos": f1["promedio_puntos"] - f2["promedio_puntos"],
+            "diff_exp": f1["experiencia"] - f2["experiencia"]
+        }])
+        
+        probs = model.predict_proba(vector)[0]
+        prob_a = probs[1] * 100
+        prob_b = probs[0] * 100
+        
+        st.markdown("---")
+        st.subheader("📊 Resultado de la Predicción")
+        
+        col_res1, col_res2 = st.columns(2)
+        col_res1.metric(label=f"{jugador_a.get('firstName')} {jugador_a.get('lastName')}", value=f"{prob_a:.1f}%")
+        col_res2.metric(label=f"{jugador_b.get('firstName')} {jugador_b.get('lastName')}", value=f"{prob_b:.1f}%")
+        
+        # Barra de progreso visual
+        st.progress(int(prob_a))
